@@ -355,19 +355,55 @@
 
   function weekTotal() { return hours.reduce((a,b)=>a+b,0); }
 
-  // Reparto automático estrictamente cronológico: las primeras 45 h de la semana
-  // son normales. Solo lo trabajado después de alcanzar 45 h pasa a Überzeit.
+  // Reparto automático equilibrado de Überzeit.
+  // La semana conserva un máximo de 45 h normales, pero las extras no se amontonan
+  // artificialmente en el último día. Primero toma 9 h normales como referencia por
+  // jornada (45 h / 5 días): con 10 h de lunes a viernes sale 1 h extra cada día.
+  // Si algún día se trabajan menos de 9 h, ese margen compensa extras de otros días
+  // para que el total automático siga siendo exactamente max(total semanal - 45, 0).
   function automaticDailyOvertime() {
-    const result = Array(7).fill(0);
-    let normalUsed = 0;
-    for (let i=0;i<7;i++) {
-      const h = saneHours(hours[i]);
-      const normalRoom = Math.max(0, NORMAL_WEEK_HOURS - normalUsed);
-      const normalToday = Math.min(h, normalRoom);
-      result[i] = Math.max(0, h - normalToday);
-      normalUsed += normalToday;
+    const worked = hours.map(saneHours);
+    const target = Math.max(0, worked.reduce((a,b)=>a+b,0) - NORMAL_WEEK_HOURS);
+    if (target <= 0) return Array(7).fill(0);
+
+    const result = worked.map(h => Math.max(0, h - 9));
+    let current = result.reduce((a,b)=>a+b,0);
+
+    // Si el reparto por 9 h/día produce más extras que las semanales reales,
+    // usa el margen de los días cortos para quitar extras empezando por las primeras.
+    if (current > target) {
+      let surplus = current - target;
+      for (let i=0; i<7 && surplus>1e-9; i++) {
+        const take = Math.min(result[i], surplus);
+        result[i] -= take;
+        surplus -= take;
+      }
     }
-    return result;
+
+    // Si hay trabajo repartido en más días y faltan extras para alcanzar el total
+    // semanal, distribúyelas en cuartos de hora entre los días trabajados, evitando
+    // concentrarlas todas en un único día.
+    current = result.reduce((a,b)=>a+b,0);
+    let missing = Math.max(0, target - current);
+    const active = worked.map((h,i)=>h>0?i:null).filter(i=>i!==null);
+    const STEP = 0.25;
+    let guard = 0;
+    while (missing > 1e-9 && active.length && guard < 5000) {
+      let changed = false;
+      for (const i of active) {
+        if (missing <= 1e-9) break;
+        const room = Math.max(0, worked[i] - result[i]);
+        if (room <= 1e-9) continue;
+        const add = Math.min(STEP, room, missing);
+        result[i] += add;
+        missing -= add;
+        changed = true;
+      }
+      if (!changed) break;
+      guard++;
+    }
+
+    return result.map(v => Math.round(v*100)/100);
   }
 
   function dailyOvertime() {
@@ -395,13 +431,15 @@
 
   function makeDayRow(i) {
     const date = addDays(selectedMonday,i);
+    const autoExtra = automaticDailyOvertime()[i];
+    const shownExtra = manualExtras[i] === null ? autoExtra : manualExtras[i];
     const row = document.createElement('div');
     row.className = 'dayrow' + (sameDay(date,new Date()) ? ' current' : '');
     row.dataset.index = i;
     row.innerHTML = `
       <div><div class="dayname">${DAY_NAMES[i]}</div><div class="daydate">${formatShortDate(date)}${sameDay(date,new Date())?' · hoy':''}</div></div>
       <div><div class="hours-label">Horas</div><div class="hours-wrap"><input class="hours" aria-label="Horas del ${DAY_NAMES[i]}" inputmode="decimal" type="number" min="0" max="24" step="0.25" value="${displayNumber(hours[i]).replace(',','.')}"><span class="unit">h</span></div></div>
-      <div><div class="hours-label">Extras</div><div class="extra-wrap"><input class="extra-input" aria-label="Horas extra manuales del ${DAY_NAMES[i]}" inputmode="decimal" type="number" min="0" max="24" step="0.25" value="${manualExtras[i] === null ? '' : displayNumber(manualExtras[i]).replace(',','.')}" placeholder="Auto"><span class="unit">h</span></div></div>
+      <div><div class="hours-label">Extras</div><div class="extra-wrap"><input class="extra-input" aria-label="Horas extra del ${DAY_NAMES[i]}" inputmode="decimal" type="number" min="0" max="24" step="0.25" value="${shownExtra > 0 ? displayNumber(shownExtra).replace(',','.') : ''}" placeholder="Auto" data-mode="${manualExtras[i] === null ? 'auto' : 'manual'}"><span class="unit">h</span></div></div>
       <button class="clear-day" aria-label="Borrar ${DAY_NAMES[i]}">×</button>`;
     const input = row.querySelector('.hours');
     const extraInput = row.querySelector('.extra-input');
@@ -411,17 +449,30 @@
       saveSelectedWeek();
       updateSummary();
       drawForm();
+      // Si este día sigue en automático, actualiza inmediatamente el valor visible.
+      if (manualExtras[i] === null) {
+        const a = automaticDailyOvertime()[i];
+        extraInput.value = a > 0 ? displayNumber(a).replace(',','.') : '';
+        extraInput.dataset.mode = 'auto';
+      }
     });
     input.addEventListener('blur', () => { input.value = displayNumber(hours[i]).replace(',','.'); });
+    extraInput.addEventListener('focus', () => { if (manualExtras[i] === null) extraInput.select(); });
     extraInput.addEventListener('input', () => {
-      if (extraInput.value.trim() === '') manualExtras[i] = null;
-      else manualExtras[i] = Math.min(hours[i], saneHours(extraInput.value));
+      if (extraInput.value.trim() === '') {
+        manualExtras[i] = null;
+        extraInput.dataset.mode = 'auto';
+      } else {
+        manualExtras[i] = Math.min(hours[i], saneHours(extraInput.value));
+        extraInput.dataset.mode = 'manual';
+      }
       saveSelectedWeek();
       updateSummary();
       drawForm();
     });
     extraInput.addEventListener('blur', () => {
-      extraInput.value = manualExtras[i] === null ? '' : displayNumber(manualExtras[i]).replace(',','.');
+      const shown = manualExtras[i] === null ? automaticDailyOvertime()[i] : manualExtras[i];
+      extraInput.value = shown > 0 ? displayNumber(shown).replace(',','.') : '';
     });
     row.querySelector('.clear-day').addEventListener('click', () => {
       hours[i] = 0; manualExtras[i] = null;
