@@ -35,6 +35,9 @@
   .weektitle{font-size:18px;font-weight:750}
   .weekrange{font-size:13px;color:var(--muted);margin-top:2px}
   .todaybtn{display:block;margin:10px auto 0;border:0;background:transparent;color:#315a99;font-weight:650;padding:5px 10px}
+  .printweek{display:flex;align-items:center;justify-content:center;gap:10px;margin:9px auto 0;font-size:14px;color:var(--muted)}
+  .printweek input{width:72px;height:40px;border:1px solid var(--line);border-radius:11px;background:#fff;text-align:center;font-size:18px;font-weight:750;color:var(--ink);outline:none}
+  .printweek input:focus{border-color:#7a7d84;box-shadow:0 0 0 3px rgba(49,90,153,.10)}
   .section-title{font-size:16px;font-weight:750;margin-bottom:9px}
   .quick{display:grid;grid-template-columns:1fr auto;gap:9px}
   textarea{width:100%;min-height:86px;border:1px solid var(--line);border-radius:15px;padding:13px 14px;font-size:17px;line-height:1.35;resize:vertical;background:#fff;color:var(--ink);outline:none}
@@ -126,6 +129,7 @@
       <button class="navbtn" id="nextWeek" aria-label="Semana siguiente">›</button>
     </div>
     <button class="todaybtn" id="goToday">Ir a esta semana</button>
+    <label class="printweek">N.º de semana en la hoja <input id="printedWeekNo" type="number" inputmode="numeric" min="1" max="53" step="1" aria-label="Número de semana que se imprime en la hoja"></label>
   </section>
 
   <section class="card">
@@ -224,6 +228,7 @@
   let selectedMonday = startOfWeek(new Date());
   let allWeeks = loadJSON(STORAGE_KEY, {});
   let hours = Array(7).fill(0);
+  let manualWeekNo = isoWeekNumber(selectedMonday);
   let recognition = null;
   let listening = false;
   let toastTimer = null;
@@ -301,11 +306,15 @@
     if (stored && Array.isArray(stored.hours)) {
       stored.hours.slice(0,7).forEach((v,i) => hours[i] = saneHours(v));
     }
+    const storedWeekNo = stored ? Number(stored.printedWeekNo) : NaN;
+    manualWeekNo = Number.isInteger(storedWeekNo) && storedWeekNo >= 1 && storedWeekNo <= 53
+      ? storedWeekNo
+      : isoWeekNumber(selectedMonday);
     renderAll();
   }
 
   function saveSelectedWeek() {
-    allWeeks[weekKey()] = { hours: hours.slice(), updatedAt: Date.now() };
+    allWeeks[weekKey()] = { hours: hours.slice(), printedWeekNo: manualWeekNo, updatedAt: Date.now() };
     saveJSON(STORAGE_KEY, allWeeks);
   }
 
@@ -362,6 +371,7 @@
     const sunday = addDays(selectedMonday,6);
     $('weekTitle').textContent = `Semana ${isoWeekNumber(selectedMonday)}`;
     $('weekRange').textContent = `${formatShortDate(selectedMonday)} – ${formatShortDate(sunday)} de ${sunday.getFullYear()}`;
+    $('printedWeekNo').value = manualWeekNo;
     $('goToday').style.visibility = sameDay(selectedMonday,startOfWeek(today)) ? 'hidden' : 'visible';
   }
 
@@ -467,7 +477,7 @@
     context.clearRect(0,0,W,H);
     context.drawImage(templateImage,0,0,W,H);
 
-    const weekNo = isoWeekNumber(selectedMonday);
+    const weekNo = manualWeekNo;
     drawCentered(context, weekNo, 502, 44, 145, 35);
     drawLeft(context, settings.name, 428, 139, 720, 29);
     drawLeft(context, settings.company, 428, 187, 710, 29);
@@ -482,14 +492,18 @@
       const showDate = i < 5 || hours[i] > 0;
       if (showDate) drawCentered(context, formatFormDate(date), X_CENTERS[i], 318, 132, 23);
       if (hours[i] > 0) {
-        drawCentered(context, formNumber(hours[i]), X_CENTERS[i], 355, 124, 24);
+        // IMPORTANT: overtime is separated from normal hours so it is never counted twice.
+        // Example: if a day has 10 h and 2 h are overtime, the normal row shows 8.00
+        // and the Überzeit row shows 2.00 (not 10.00 + 2.00).
+        const normalDayHours = Math.max(0, hours[i] - overtime[i]);
+        drawCentered(context, formNumber(normalDayHours), X_CENTERS[i], 355, 124, 24);
         drawCentered(context, overtime[i] > 0 ? formNumber(overtime[i]) : '–', X_CENTERS[i], 392, 124, 24);
         if (exp > 0) drawCentered(context, formNumber(exp), X_CENTERS[i], 619, 124, 23);
       }
     }
 
     if (total > 0) {
-      drawCentered(context, formNumber(total), 1367, 355, 118, 25);
+      drawCentered(context, formNumber(total - totalExtra()), 1367, 355, 118, 25);
       drawCentered(context, formNumber(totalExtra()), 1367, 392, 118, 25);
       if (exp > 0) drawCentered(context, formNumber(expenseTotal()), 1367, 619, 118, 24);
     }
@@ -725,7 +739,7 @@
   }
 
   function fileName() {
-    return `Parte_Seeland_semana_${isoWeekNumber(selectedMonday)}_${localDateKey(selectedMonday)}.png`;
+    return `Parte_Seeland_semana_${manualWeekNo}_${localDateKey(selectedMonday)}.png`;
   }
 
   async function shareCanvas() {
@@ -733,7 +747,7 @@
       const blob=await canvasBlob();
       const file=new File([blob],fileName(),{type:'image/png'});
       if(navigator.share && navigator.canShare && navigator.canShare({files:[file]})) {
-        await navigator.share({title:`Parte de horas · Semana ${isoWeekNumber(selectedMonday)}`,files:[file]});
+        await navigator.share({title:`Parte de horas · Semana ${manualWeekNo}`,files:[file]});
       } else {
         downloadBlob(blob,fileName());
         showToast('Imagen guardada');
@@ -763,7 +777,9 @@
   async function copySummary() {
     const overtime=dailyOvertime();
     const lines=hours.map((h,i)=>h>0?`${DAY_NAMES[i]} ${humanNumber(h)} h${overtime[i]>0?` (${humanNumber(overtime[i])} extra)`:''}`:null).filter(Boolean);
-    const text=`Semana ${isoWeekNumber(selectedMonday)}\n${lines.join('\n')}\nTotal: ${humanNumber(weekTotal())} h\nExtras: ${humanNumber(totalExtra())} h\nDietas: ${humanNumber(expenseTotal())} CHF`;
+    const realWeek=isoWeekNumber(selectedMonday);
+    const weekLine = manualWeekNo === realWeek ? `Semana ${manualWeekNo}` : `Semana seleccionada ${realWeek} · N.º en hoja ${manualWeekNo}`;
+    const text=`${weekLine}\n${lines.join('\n')}\nTotal: ${humanNumber(weekTotal())} h\nExtras: ${humanNumber(totalExtra())} h\nDietas: ${humanNumber(expenseTotal())} CHF`;
     try { await navigator.clipboard.writeText(text); showToast('Resumen copiado'); }
     catch(_) {
       const ta=document.createElement('textarea'); ta.value=text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); showToast('Resumen copiado');
@@ -774,6 +790,23 @@
   $('prevWeek').addEventListener('click',()=>{selectedMonday=addDays(selectedMonday,-7);loadSelectedWeek();});
   $('nextWeek').addEventListener('click',()=>{selectedMonday=addDays(selectedMonday,7);loadSelectedWeek();});
   $('goToday').addEventListener('click',()=>{selectedMonday=startOfWeek(new Date());loadSelectedWeek();});
+  $('printedWeekNo').addEventListener('input',()=>{
+    const n = Math.trunc(Number($('printedWeekNo').value));
+    if (Number.isInteger(n) && n >= 1 && n <= 53) {
+      manualWeekNo = n;
+      saveSelectedWeek();
+      drawForm();
+    }
+  });
+  $('printedWeekNo').addEventListener('blur',()=>{
+    const n = Math.trunc(Number($('printedWeekNo').value));
+    if (!Number.isInteger(n) || n < 1 || n > 53) {
+      manualWeekNo = isoWeekNumber(selectedMonday);
+      $('printedWeekNo').value = manualWeekNo;
+      saveSelectedWeek();
+      drawForm();
+    }
+  });
   $('interpretButton').addEventListener('click',interpretCurrentText);
   $('voiceButton').addEventListener('click',startVoice);
   $('naturalText').addEventListener('keydown',e=>{if((e.metaKey||e.ctrlKey)&&e.key==='Enter')interpretCurrentText();});
