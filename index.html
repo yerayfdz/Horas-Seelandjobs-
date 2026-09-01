@@ -52,7 +52,12 @@
   .status.show{display:block}
   .status.error{background:#fff1f1;color:#8b2630}
   .days{display:flex;flex-direction:column;gap:8px}
-  .dayrow{display:grid;grid-template-columns:minmax(114px,1fr) 108px 36px;gap:9px;align-items:center;border:1px solid var(--line);border-radius:15px;padding:9px 9px 9px 12px;background:#fff}
+  .dayrow{display:grid;grid-template-columns:minmax(114px,1fr) 96px 96px 36px;gap:8px;align-items:center;border:1px solid var(--line);border-radius:15px;padding:9px 9px 9px 12px;background:#fff}
+  .hours-label{font-size:10px;color:var(--muted);margin:0 0 3px 4px;text-align:left}
+  .extra-wrap{position:relative}
+  .extra-input{width:100%;height:45px;border:1px solid #e6c897;border-radius:12px;padding:0 28px 0 9px;font-size:19px;font-weight:750;text-align:right;background:#fffaf1;outline:none}
+  .extra-input::placeholder{font-size:12px;font-weight:600;color:#9a8465}
+  .extra-input:focus{border-color:#c38b38;box-shadow:0 0 0 3px rgba(195,139,56,.12)}
   .dayrow.current{border-color:#9da6b5;background:#f9fbff}
   .dayname{font-size:16px;font-weight:730;text-transform:capitalize}
   .daydate{font-size:12px;color:var(--muted);margin-top:2px}
@@ -99,6 +104,9 @@
     .metric-value{font-size:19px}
     .settings{grid-template-columns:1fr}
     .field.full{grid-column:auto}
+    .dayrow{grid-template-columns:minmax(95px,1fr) 82px 82px 34px;gap:6px;padding-left:9px}
+    .hours,.extra-input{font-size:17px;padding-left:7px;padding-right:25px}
+    .unit{right:8px}
   }
   @media print{
     body{background:#fff}
@@ -156,7 +164,7 @@
       <div class="metric"><div class="metric-label">Extras</div><div class="metric-value" id="extraHours">0 h</div></div>
       <div class="metric"><div class="metric-label">Dietas</div><div class="metric-value" id="expenseTotal">0 CHF</div></div>
     </div>
-    <div class="rule">Las primeras 45 h son normales. A partir de la hora 46 se coloca como <b>Überzeit</b>.</div>
+    <div class="rule">Las primeras 45 h son normales. Desde la hora 46 se calcula <b>Überzeit</b>. Si escribes una cantidad en «Extras», ese día pasa a modo manual y esas horas se restan de las normales.</div>
     <button class="primary" id="openPreview">Ver hoja terminada</button>
   </section>
 
@@ -228,6 +236,7 @@
   let selectedMonday = startOfWeek(new Date());
   let allWeeks = loadJSON(STORAGE_KEY, {});
   let hours = Array(7).fill(0);
+  let manualExtras = Array(7).fill(null); // null = automático; número = extra manual de ese día
   let manualWeekNo = isoWeekNumber(selectedMonday);
   let recognition = null;
   let listening = false;
@@ -306,6 +315,12 @@
     if (stored && Array.isArray(stored.hours)) {
       stored.hours.slice(0,7).forEach((v,i) => hours[i] = saneHours(v));
     }
+    manualExtras = Array(7).fill(null);
+    if (stored && Array.isArray(stored.manualExtras)) {
+      stored.manualExtras.slice(0,7).forEach((v,i) => {
+        if (v !== null && v !== '' && Number.isFinite(Number(v))) manualExtras[i] = saneHours(v);
+      });
+    }
     const storedWeekNo = stored ? Number(stored.printedWeekNo) : NaN;
     manualWeekNo = Number.isInteger(storedWeekNo) && storedWeekNo >= 1 && storedWeekNo <= 53
       ? storedWeekNo
@@ -314,7 +329,7 @@
   }
 
   function saveSelectedWeek() {
-    allWeeks[weekKey()] = { hours: hours.slice(), printedWeekNo: manualWeekNo, updatedAt: Date.now() };
+    allWeeks[weekKey()] = { hours: hours.slice(), manualExtras: manualExtras.slice(), printedWeekNo: manualWeekNo, updatedAt: Date.now() };
     saveJSON(STORAGE_KEY, allWeeks);
   }
 
@@ -339,29 +354,32 @@
   }
 
   function weekTotal() { return hours.reduce((a,b)=>a+b,0); }
-  function totalExtra() { return Math.max(0, weekTotal()-NORMAL_WEEK_HOURS); }
 
-  function dailyOvertime() {
+  // Reparto automático estrictamente cronológico: las primeras 45 h de la semana
+  // son normales. Solo lo trabajado después de alcanzar 45 h pasa a Überzeit.
+  function automaticDailyOvertime() {
     const result = Array(7).fill(0);
-    let remaining = totalExtra();
-    const excess = hours.map((h,i)=>Math.max(0,h-DAILY_BASE[i]));
-    for (let i=0;i<7 && remaining>0;i++) {
-      const take = Math.min(excess[i], remaining);
-      result[i] = take;
-      remaining -= take;
-    }
-    // Salvaguarda para cualquier combinación atípica.
-    if (remaining > 0) {
-      for (let i=6;i>=0 && remaining>0;i--) {
-        const room = Math.max(0, hours[i]-result[i]);
-        const take = Math.min(room, remaining);
-        result[i] += take;
-        remaining -= take;
-      }
+    let normalUsed = 0;
+    for (let i=0;i<7;i++) {
+      const h = saneHours(hours[i]);
+      const normalRoom = Math.max(0, NORMAL_WEEK_HOURS - normalUsed);
+      const normalToday = Math.min(h, normalRoom);
+      result[i] = Math.max(0, h - normalToday);
+      normalUsed += normalToday;
     }
     return result;
   }
 
+  function dailyOvertime() {
+    const auto = automaticDailyOvertime();
+    return hours.map((h,i) => {
+      if (manualExtras[i] === null) return auto[i];
+      // Una extra manual siempre pertenece al total del día: nunca se duplica.
+      return Math.min(saneHours(h), saneHours(manualExtras[i]));
+    });
+  }
+
+  function totalExtra() { return dailyOvertime().reduce((a,b)=>a+b,0); }
   function workedDays() { return hours.filter(h=>h>0).length; }
   function expenseTotal() { return workedDays() * Number(settings.expense || 0); }
 
@@ -382,18 +400,31 @@
     row.dataset.index = i;
     row.innerHTML = `
       <div><div class="dayname">${DAY_NAMES[i]}</div><div class="daydate">${formatShortDate(date)}${sameDay(date,new Date())?' · hoy':''}</div></div>
-      <div class="hours-wrap"><input class="hours" aria-label="Horas del ${DAY_NAMES[i]}" inputmode="decimal" type="number" min="0" max="24" step="0.25" value="${displayNumber(hours[i]).replace(',','.')}"><span class="unit">h</span></div>
+      <div><div class="hours-label">Horas</div><div class="hours-wrap"><input class="hours" aria-label="Horas del ${DAY_NAMES[i]}" inputmode="decimal" type="number" min="0" max="24" step="0.25" value="${displayNumber(hours[i]).replace(',','.')}"><span class="unit">h</span></div></div>
+      <div><div class="hours-label">Extras</div><div class="extra-wrap"><input class="extra-input" aria-label="Horas extra manuales del ${DAY_NAMES[i]}" inputmode="decimal" type="number" min="0" max="24" step="0.25" value="${manualExtras[i] === null ? '' : displayNumber(manualExtras[i]).replace(',','.')}" placeholder="Auto"><span class="unit">h</span></div></div>
       <button class="clear-day" aria-label="Borrar ${DAY_NAMES[i]}">×</button>`;
-    const input = row.querySelector('input');
+    const input = row.querySelector('.hours');
+    const extraInput = row.querySelector('.extra-input');
     input.addEventListener('input', () => {
       hours[i] = saneHours(input.value);
+      if (manualExtras[i] !== null) manualExtras[i] = Math.min(hours[i], saneHours(manualExtras[i]));
       saveSelectedWeek();
       updateSummary();
       drawForm();
     });
     input.addEventListener('blur', () => { input.value = displayNumber(hours[i]).replace(',','.'); });
+    extraInput.addEventListener('input', () => {
+      if (extraInput.value.trim() === '') manualExtras[i] = null;
+      else manualExtras[i] = Math.min(hours[i], saneHours(extraInput.value));
+      saveSelectedWeek();
+      updateSummary();
+      drawForm();
+    });
+    extraInput.addEventListener('blur', () => {
+      extraInput.value = manualExtras[i] === null ? '' : displayNumber(manualExtras[i]).replace(',','.');
+    });
     row.querySelector('.clear-day').addEventListener('click', () => {
-      hours[i] = 0;
+      hours[i] = 0; manualExtras[i] = null;
       saveSelectedWeek();
       renderDays(); updateSummary(); drawForm();
     });
@@ -824,7 +855,7 @@
   ['settingName','settingCompany','settingSite','settingExpense','settingSignature'].forEach(id=>$(id).addEventListener('input',saveSettingsFromUI));
   $('clearWeek').addEventListener('click',()=>{
     if(confirm('¿Borrar todas las horas de esta semana?')) {
-      hours=Array(7).fill(0); saveSelectedWeek(); renderAll(); showToast('Semana borrada');
+      hours=Array(7).fill(0); manualExtras=Array(7).fill(null); saveSelectedWeek(); renderAll(); showToast('Semana borrada');
     }
   });
 
